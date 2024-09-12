@@ -4,12 +4,12 @@ use core::{
     mem,
     ops::Range,
     pin::Pin,
-    ptr, str,
+    ptr, result, str,
     task::{Context, Poll},
 };
 use std::{
     fs::{self, File},
-    io::{BufWriter, Error, Read, Write},
+    io::{self, BufWriter, Error, Read, Write},
     os::{
         fd::{FromRawFd, OwnedFd},
         unix::{ffi::OsStrExt, fs::FileExt},
@@ -25,7 +25,7 @@ use tokio::io::unix::AsyncFd;
 mod bindings;
 mod error;
 
-type Result<T, E = error::Error> = core::result::Result<T, E>;
+type Result<T, E = error::Error> = result::Result<T, E>;
 
 #[derive(FromArgs)]
 #[argh(description = "Find out what (accesses,writes) this address.")]
@@ -83,15 +83,15 @@ fn validate_bp_len(value: &str) -> Result<u32, String> {
     }
 }
 
-struct ParseMapsIter<'a>(core::str::Lines<'a>);
+struct ParseMaps<'a>(str::Lines<'a>);
 
-impl<'a> ParseMapsIter<'a> {
+impl<'a> ParseMaps<'a> {
     fn new(contents: &'a str) -> Self {
         Self(contents.lines())
     }
 }
 
-impl<'a> Iterator for ParseMapsIter<'a> {
+impl Iterator for ParseMaps<'_> {
     type Item = Range<u64>;
 
     #[inline]
@@ -175,7 +175,7 @@ mod Register {
 #[inline]
 const fn iced_register_to_perf_id(reg: IcedRegister) -> Option<usize> {
     let id = match reg {
-        // General IcedRegister
+        // General Register
         IcedRegister::RAX | IcedRegister::EAX | IcedRegister::AX | IcedRegister::AH => 0,
         IcedRegister::RBX | IcedRegister::EBX | IcedRegister::BX | IcedRegister::BH => 1,
         IcedRegister::RCX | IcedRegister::ECX | IcedRegister::CX | IcedRegister::CH => 2,
@@ -192,12 +192,12 @@ const fn iced_register_to_perf_id(reg: IcedRegister) -> Option<usize> {
         IcedRegister::R13 | IcedRegister::R13D | IcedRegister::R13W => 14,
         IcedRegister::R14 | IcedRegister::R14D | IcedRegister::R14W => 15,
         IcedRegister::R15 | IcedRegister::R15D | IcedRegister::R15W => 16,
-        // Special IcedRegisters
+        // Special Registers
         IcedRegister::RIP | IcedRegister::EIP => 8,
         // Disasm has no FLAGS
-        // Segment IcedRegisters
+        // Segment Registers
         // Disasm OpKind::Memory has no CS, SS, DS, ES, FS, GS
-        // TODO Other IcedRegisters ?
+        // TODO Other Registers ?
         _ => return None,
     };
     Some(id)
@@ -245,7 +245,7 @@ impl PerfMap {
         let ret = unsafe {
             libc::mmap(
                 ptr::null_mut(),
-                8192,
+                0x2000,
                 PROT_READ | PROT_WRITE,
                 MAP_SHARED,
                 raw_fd,
@@ -262,7 +262,7 @@ impl PerfMap {
         })
     }
 
-    async fn try_events<F>(&self, handle: F) -> Result<Infallible, Error>
+    async fn try_events<F>(&self, f: F) -> Result<Infallible, Error>
     where
         F: Fn(SampleData) -> Result<(), Error>,
     {
@@ -283,11 +283,11 @@ impl PerfMap {
                     let tid = unsafe { *(get_addr(offset) as *const u32) };
                     offset += 12;
                     let mut regs = [0u64; Register::regs_count()];
-                    for reg in regs.iter_mut() {
+                    regs.iter_mut().for_each(|reg| {
                         *reg = unsafe { *(get_addr(offset) as *const u64) };
                         offset += 8;
-                    }
-                    handle(SampleData { pid, tid, regs })?;
+                    });
+                    f(SampleData { pid, tid, regs })?;
                 }
                 read_data_size += data_header.size as u64;
                 mmap_page_metadata.data_tail = read_data_size;
@@ -308,7 +308,7 @@ impl Process {
         let bitness = get_bitness(pid)?;
         let mem = File::open(format!("/proc/{pid}/mem"))?;
         let contents = fs::read_to_string(format!("/proc/{pid}/maps"))?;
-        let range = ParseMapsIter::new(&contents).collect::<Vec<_>>();
+        let range = ParseMaps::new(&contents).collect::<Vec<_>>();
         Ok(Self {
             mem,
             range,
@@ -364,8 +364,8 @@ async fn async_main(args: Args) -> Result<()> {
     select_all(maps.into_iter().map(|perf| {
         let proc = proc.clone();
         tokio::spawn(async move {
-            let handle = |data| handle_event(data, &proc);
-            perf.try_events(handle).await
+            let f = |data| handle_event(data, &proc);
+            perf.try_events(f).await
         })
     }))
     .await
@@ -398,12 +398,10 @@ fn handle_event(data: SampleData, proc: &Process) -> Result<(), Error> {
 
     let instructions = decoder.into_iter().collect::<Vec<_>>();
 
-    let mut output = String::with_capacity(0x80000);
-    let mut formatter = FastFormatter::new();
-
     if let Some(k1) = instructions.iter().position(|v| v.next_ip() == ip) {
-        let stdout = std::io::stdout();
-        let mut stdout = BufWriter::new(stdout);
+        let mut output = String::with_capacity(0x2000);
+        let mut formatter = FastFormatter::new();
+        let mut stdout = BufWriter::new(io::stdout());
 
         writeln!(stdout, "[Pid: {pid}   Tid: {tid}]")?;
 
@@ -413,7 +411,7 @@ fn handle_event(data: SampleData, proc: &Process) -> Result<(), Error> {
             write!(
                 stdout,
                 "{} {:016X} ",
-                if k1 == k2 { ">>" } else { "  " },
+                if k1 == k2 { "->" } else { "  " },
                 v.ip()
             )?;
 
