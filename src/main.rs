@@ -69,18 +69,14 @@ fn validate_bp_type(value: &str) -> Result<u32, String> {
 }
 
 fn validate_bp_len(value: &str) -> Result<u32, String> {
-    let value = value.parse::<u32>().map_err(|e| e.to_string())?;
-    let bp = [
-        bindings::HW_BREAKPOINT_LEN_1,
-        bindings::HW_BREAKPOINT_LEN_2,
-        bindings::HW_BREAKPOINT_LEN_4,
-        bindings::HW_BREAKPOINT_LEN_8,
-    ];
-    if bp.contains(&value) {
-        Ok(value)
-    } else {
-        Err("watchpoint length must be one of (1,2,4,8)".into())
-    }
+    let bp_len = match value {
+        "1" => bindings::HW_BREAKPOINT_LEN_1,
+        "2" => bindings::HW_BREAKPOINT_LEN_2,
+        "4" => bindings::HW_BREAKPOINT_LEN_4,
+        "8" => bindings::HW_BREAKPOINT_LEN_8,
+        _ => return Err("watchpoint length must be one of (1,2,4,8)".into()),
+    };
+    Ok(bp_len)
 }
 
 struct ParseMaps<'a>(str::Lines<'a>);
@@ -387,7 +383,7 @@ fn handle_event(data: SampleData, proc: &Process) -> Result<(), Error> {
     let addr = range
         .iter()
         .find(|x| x.contains(&ip))
-        .map(|r| r.start.max(ip - 512))
+        .map(|r| r.start.max(ip.saturating_sub(512)))
         .ok_or_else(|| Error::other("Unknown memory range"))?;
 
     let mut bytes = [0_u8; 1024];
@@ -427,7 +423,7 @@ fn handle_event(data: SampleData, proc: &Process) -> Result<(), Error> {
 
             output.clear();
             formatter.format(v, &mut output);
-            writeln!(stdout, " {}", output)?;
+            writeln!(stdout, " {output}")?;
         }
 
         writeln!(stdout)?;
